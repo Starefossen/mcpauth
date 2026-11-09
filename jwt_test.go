@@ -289,6 +289,8 @@ func TestJWTConfigValidation(t *testing.T) {
 		"unknown field":  `{"issuer":"i","audience":"a","jwks_url":"https://x","alg":"none"}`,
 		"bad json":       `{`,
 		"name collision": `{"issuer":"i","audience":"a","jwks_url":"https://x","callers":{"u":"legacy"}}`,
+		"empty sub":      `{"issuer":"i","audience":"a","jwks_url":"https://x","callers":{"":"varden"}}`,
+		"blank sub":      `{"issuer":"i","audience":"a","jwks_url":"https://x","callers":{" ":"varden"}}`,
 	} {
 		d := t.TempDir()
 		write(t, filepath.Join(d, "read", jwksFile), cfg)

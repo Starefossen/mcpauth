@@ -138,7 +138,10 @@ func loadGroup(gdir string) (verifier, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, name := range j.cfg.Callers {
+	for sub, name := range j.cfg.Callers {
+		if strings.TrimSpace(sub) == "" {
+			return nil, fmt.Errorf("%s: caller %q has an empty sub", jwksFile, name)
+		}
 		if name == "" || slices.Contains(v.callers, name) {
 			return nil, fmt.Errorf("%s: caller name %q empty or used by a static token", jwksFile, name)
 		}
