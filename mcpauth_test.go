@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	tokVarden = "varden-token-0123456789"
-	tokLegacy = "legacy-token-0123456789"
+	tokAlice = "alice-token-0123456789"
+	tokBob = "bob-token-0123456789"
 )
 
 func write(t *testing.T, p, s string) {
@@ -28,8 +28,8 @@ func write(t *testing.T, p, s string) {
 
 func fixture(t *testing.T) string {
 	d := t.TempDir()
-	write(t, filepath.Join(d, "read/varden"), tokVarden+"\n")
-	write(t, filepath.Join(d, "read/legacy"), tokLegacy)
+	write(t, filepath.Join(d, "read/alice"), tokAlice+"\n")
+	write(t, filepath.Join(d, "read/bob"), tokBob)
 	return d
 }
 
@@ -60,7 +60,7 @@ func TestLoadSixteenBytesOK(t *testing.T) {
 
 func TestLoadK8sProjection(t *testing.T) {
 	d := t.TempDir()
-	write(t, filepath.Join(d, "..2025_01_01_00_00_00.123/read/varden"), tokVarden)
+	write(t, filepath.Join(d, "..2025_01_01_00_00_00.123/read/alice"), tokAlice)
 	must(t, os.Symlink("..2025_01_01_00_00_00.123", filepath.Join(d, "..data")))
 	must(t, os.Symlink("..data/read", filepath.Join(d, "read")))
 	a, err := Load(d)
@@ -70,7 +70,7 @@ func TestLoadK8sProjection(t *testing.T) {
 	if len(a.groups) != 1 || !a.Has("read") {
 		t.Fatalf("groups=%v", a.groups)
 	}
-	if c := do(t, a, "read", "Bearer "+tokVarden, ""); c.code != 200 || c.caller != "varden" {
+	if c := do(t, a, "read", "Bearer "+tokAlice, ""); c.code != 200 || c.caller != "alice" {
 		t.Fatalf("%+v", c)
 	}
 }
@@ -111,21 +111,21 @@ func do(t *testing.T, a *Auth, group, authz, query string) result {
 func TestRequire(t *testing.T) {
 	a, err := Load(fixture(t))
 	must(t, err)
-	if c := do(t, a, "read", "Bearer "+tokVarden, ""); c.code != 200 || c.caller != "varden" || c.log != "caller=\"varden\" path=/sse\n" {
-		t.Errorf("varden: %+v", c)
+	if c := do(t, a, "read", "Bearer "+tokAlice, ""); c.code != 200 || c.caller != "alice" || c.log != "caller=\"alice\" path=/sse\n" {
+		t.Errorf("alice: %+v", c)
 	}
-	if c := do(t, a, "read", "Bearer "+tokLegacy, ""); c.code != 200 || c.caller != "legacy" {
-		t.Errorf("legacy: %+v", c)
+	if c := do(t, a, "read", "Bearer "+tokBob, ""); c.code != 200 || c.caller != "bob" {
+		t.Errorf("bob: %+v", c)
 	}
 	denied := map[string][2]string{
 		"none":          {"", ""},
-		"query":         {"", "?token=" + tokVarden},
-		"bare":          {tokVarden, ""},
-		"basic":         {"Basic " + tokVarden, ""},
-		"lower bearer":  {"bearer " + tokVarden, ""},
+		"query":         {"", "?token=" + tokAlice},
+		"bare":          {tokAlice, ""},
+		"basic":         {"Basic " + tokAlice, ""},
+		"lower bearer":  {"bearer " + tokAlice, ""},
 		"wrong":         {"Bearer wrong-token-0123456789", ""},
-		"prefix":        {"Bearer " + tokVarden[:16], ""},
-		"trailing junk": {"Bearer " + tokVarden + "x", ""},
+		"prefix":        {"Bearer " + tokAlice[:16], ""},
+		"trailing junk": {"Bearer " + tokAlice + "x", ""},
 	}
 	for name, in := range denied {
 		c := do(t, a, "read", in[0], in[1])
@@ -136,7 +136,7 @@ func TestRequire(t *testing.T) {
 			t.Errorf("%s: log %q", name, c.log)
 		}
 	}
-	if c := do(t, a, "write", "Bearer "+tokVarden, ""); c.code != 401 {
+	if c := do(t, a, "write", "Bearer "+tokAlice, ""); c.code != 401 {
 		t.Errorf("unknown group: %+v", c)
 	}
 }
@@ -144,8 +144,8 @@ func TestRequire(t *testing.T) {
 func TestLogNeverContainsToken(t *testing.T) {
 	a, err := Load(fixture(t))
 	must(t, err)
-	for _, authz := range []string{"Bearer " + tokVarden, "Bearer " + tokVarden + "x", tokLegacy} {
-		if c := do(t, a, "read", authz, ""); strings.Contains(c.log, tokVarden) || strings.Contains(c.log, tokLegacy) {
+	for _, authz := range []string{"Bearer " + tokAlice, "Bearer " + tokAlice + "x", tokBob} {
+		if c := do(t, a, "read", authz, ""); strings.Contains(c.log, tokAlice) || strings.Contains(c.log, tokBob) {
 			t.Errorf("token in log: %q", c.log)
 		}
 	}
@@ -158,7 +158,7 @@ func TestCompareAllTokensNoEarlyExit(t *testing.T) {
 	old := ctEqual
 	ctEqual = func(x, y [32]byte) int { n++; return old(x, y) }
 	defer func() { ctEqual = old }()
-	for _, tok := range []string{tokLegacy, tokVarden, "nope-nope-nope-nope"} {
+	for _, tok := range []string{tokBob, tokAlice, "nope-nope-nope-nope"} {
 		n = 0
 		a.groups["read"].verify(t.Context(), tok)
 		if n != 2 {

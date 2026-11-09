@@ -45,7 +45,7 @@ type jwtConfig struct {
 	JWKSURL  string `json:"jwks_url"`
 	// RequiredScope lists scopes that must all be in the token's scope claim.
 	RequiredScope []string `json:"required_scope"`
-	// Callers maps sub (a Kanidm UUID) to a readable caller name. It is an
+	// Callers maps sub (the subject identifier) to a readable caller name. It is an
 	// allowlist: a token whose sub is not listed is rejected.
 	Callers map[string]string `json:"callers"`
 }
@@ -164,7 +164,7 @@ func fetchJWKS(ctx context.Context, url string) (map[string]*ecdsa.PublicKey, er
 }
 
 // key returns the key for kid, refetching the JWKS on a miss at most once
-// per kidRefetchGap so random kids cannot hammer Kanidm.
+// per kidRefetchGap so random kids cannot hammer the issuer.
 func (j *jwtVerifier) key(ctx context.Context, kid string) *ecdsa.PublicKey {
 	j.mu.Lock()
 	k := j.keys[kid]
