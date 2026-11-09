@@ -1,10 +1,3 @@
-// Package mcpauth authenticates MCP callers by bearer token.
-//
-// Tokens live in files under MCP_CALLERS_DIR as <group>/<caller>, typically a
-// projected Kubernetes Secret. Servers call Load once at start and wrap
-// protected routes with Require. /health must be mounted outside Require.
-// Tokens are read once at start: rotate by rolling out a new revision or
-// restarting the pods.
 package mcpauth
 
 import (
@@ -24,8 +17,7 @@ import (
 
 const minTokenLen = 16
 
-// verifier is the extension point for phase 2 (Kanidm JWTs). Keep it
-// unexported until a second implementation exists.
+// verifier checks a bearer token for one group.
 type verifier interface {
 	verify(ctx context.Context, bearer string) (caller string, ok bool)
 }
