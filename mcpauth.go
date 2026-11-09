@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -91,7 +92,7 @@ func Load(dir string) (*Auth, error) {
 	return a, nil
 }
 
-func loadGroup(gdir string) (*staticVerifier, error) {
+func loadGroup(gdir string) (verifier, error) {
 	entries, err := os.ReadDir(gdir)
 	if err != nil {
 		return nil, err
@@ -100,7 +101,7 @@ func loadGroup(gdir string) (*staticVerifier, error) {
 	seen := map[[32]byte]string{}
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, ".") {
+		if strings.HasPrefix(name, ".") || name == jwksFile {
 			continue
 		}
 		p := filepath.Join(gdir, name)
@@ -126,10 +127,27 @@ func loadGroup(gdir string) (*staticVerifier, error) {
 		v.callers = append(v.callers, name)
 		v.hashes = append(v.hashes, h)
 	}
-	if len(v.callers) == 0 {
-		return nil, errors.New("no non-empty token files")
+	jp := filepath.Join(gdir, jwksFile)
+	if _, err := os.Stat(jp); err != nil {
+		if len(v.callers) == 0 {
+			return nil, errors.New("no non-empty token files")
+		}
+		return v, nil
 	}
-	return v, nil
+	j, err := loadJWTConfig(jp)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range j.cfg.Callers {
+		if name == "" || slices.Contains(v.callers, name) {
+			return nil, fmt.Errorf("%s: caller name %q empty or used by a static token", jwksFile, name)
+		}
+	}
+	j.start(context.Background())
+	if len(v.callers) == 0 {
+		return j, nil
+	}
+	return multiVerifier{v, j}, nil
 }
 
 // Has reports whether group was loaded.
@@ -146,7 +164,7 @@ func (a *Auth) Require(group string, next http.Handler) http.Handler {
 		if v != nil {
 			if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
 				if caller, ok := v.verify(r.Context(), bearer); ok {
-					logf("caller=%s path=%s", caller, r.URL.Path)
+					logf("caller=%q path=%s", caller, r.URL.Path)
 					next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, caller)))
 					return
 				}

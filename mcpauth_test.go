@@ -111,7 +111,7 @@ func do(t *testing.T, a *Auth, group, authz, query string) result {
 func TestRequire(t *testing.T) {
 	a, err := Load(fixture(t))
 	must(t, err)
-	if c := do(t, a, "read", "Bearer "+tokVarden, ""); c.code != 200 || c.caller != "varden" || c.log != "caller=varden path=/sse\n" {
+	if c := do(t, a, "read", "Bearer "+tokVarden, ""); c.code != 200 || c.caller != "varden" || c.log != "caller=\"varden\" path=/sse\n" {
 		t.Errorf("varden: %+v", c)
 	}
 	if c := do(t, a, "read", "Bearer "+tokLegacy, ""); c.code != 200 || c.caller != "legacy" {
