@@ -143,6 +143,9 @@ func loadGroup(gdir string) (verifier, error) {
 			return nil, fmt.Errorf("%s: caller name %q empty or used by a static token", jwksFile, name)
 		}
 	}
+	if len(j.cfg.Callers) == 0 {
+		logf("mcpauth: %s has no callers; no JWT will be accepted", jp)
+	}
 	j.start(context.Background())
 	if len(v.callers) == 0 {
 		return j, nil

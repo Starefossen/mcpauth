@@ -57,8 +57,10 @@ key are rejected), `alg` is ES256 (none/HS*/RS* rejected), `kid` known,
 `iss`, `aud` contains `audience`, `exp` required, `nbf`, with 60 s skew.
 Every `required_scope` entry must be in the space-separated `scope` claim.
 Kanidm access tokens carry no `groups` or `preferred_username`, so the caller
-is `sub` (the account UUID), or its name from `callers`. A `callers` name may
-not reuse a static caller name in the same group. Static tokens keep working
+is named by `callers`, which maps `sub` (the account UUID) to a name.
+`callers` is an allowlist: a token whose `sub` is not listed is rejected, so
+an empty or missing `callers` accepts no JWT (`Load` logs a warning). A
+`callers` name may not reuse a static caller name in the same group. Static tokens keep working
 beside JWTs, so callers migrate one at a time. A group may hold only
 `jwks.json`. JWKS fetches never follow redirects.
 
@@ -69,6 +71,8 @@ keyset, so an issuer outage only stops callers once their tokens expire.
 
 ## Security notes
 
+- Callers that obtain tokens by token exchange must not store the
+  `refresh_token` from the response. Keep only the short-lived access token.
 - Fail closed. `Load` returns an error if the directory is unset, missing,
   has no groups, or a group has no usable token. Requests to an unknown group
   are rejected.
