@@ -1,6 +1,7 @@
 package mcpauth
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -13,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -149,8 +151,8 @@ func TestJWTAccepts(t *testing.T) {
 	cl["sub"] = "unmapped-uuid"
 	cl["aud"] = []string{"other", testAud}
 	cl["scope"] = "groups openid extra"
-	if c := do(t, a, "read", "Bearer "+sign(t, k, map[string]any{"alg": "ES256", "kid": "k1", "typ": "AT+JWT"}, cl), ""); c.caller != "unmapped-uuid" {
-		t.Fatalf("sub fallback: %+v", c)
+	if c := do(t, a, "read", "Bearer "+sign(t, k, map[string]any{"alg": "ES256", "kid": "k1", "typ": "AT+JWT"}, cl), ""); c.code != 401 || c.caller != "" {
+		t.Fatalf("unlisted sub must be rejected: %+v", c)
 	}
 }
 
@@ -294,5 +296,21 @@ func TestJWTConfigValidation(t *testing.T) {
 		if _, err := Load(d); err == nil {
 			t.Errorf("%s: Load succeeded", name)
 		}
+	}
+}
+
+func TestJWTNoCallersAcceptsNothing(t *testing.T) {
+	var buf bytes.Buffer
+	old := logf
+	logf = func(f string, v ...any) { fmt.Fprintf(&buf, f+"\n", v...) }
+	cfg := `{"issuer":"` + testIss + `","audience":"` + testAud + `","jwks_url":"%s","required_scope":["groups"]}`
+	a, _, k := setupJWT(t, cfg, false)
+	logf = old
+	if !strings.Contains(buf.String(), "no callers") {
+		t.Fatalf("missing warning: %q", buf.String())
+	}
+	tok := sign(t, k, map[string]any{"alg": "ES256", "kid": "k1", "typ": "at+jwt"}, kanidmClaims())
+	if c := do(t, a, "read", "Bearer "+tok, ""); c.code != 401 {
+		t.Fatalf("%+v", c)
 	}
 }

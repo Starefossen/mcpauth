@@ -45,7 +45,8 @@ type jwtConfig struct {
 	JWKSURL  string `json:"jwks_url"`
 	// RequiredScope lists scopes that must all be in the token's scope claim.
 	RequiredScope []string `json:"required_scope"`
-	// Callers maps sub (a Kanidm UUID) to a readable caller name.
+	// Callers maps sub (a Kanidm UUID) to a readable caller name. It is an
+	// allowlist: a token whose sub is not listed is rejected.
 	Callers map[string]string `json:"callers"`
 }
 
@@ -249,10 +250,8 @@ func (j *jwtVerifier) verify(ctx context.Context, bearer string) (string, bool) 
 			return "", false
 		}
 	}
-	if name, ok := j.cfg.Callers[c.Sub]; ok {
-		return name, true
-	}
-	return c.Sub, c.Sub != ""
+	name, ok := j.cfg.Callers[c.Sub]
+	return name, ok
 }
 
 func decodeSegment(seg string, v any) bool {
