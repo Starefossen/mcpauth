@@ -91,7 +91,7 @@ func Load(dir string) (*Auth, error) {
 	return a, nil
 }
 
-func loadGroup(gdir string) (*staticVerifier, error) {
+func loadGroup(gdir string) (verifier, error) {
 	entries, err := os.ReadDir(gdir)
 	if err != nil {
 		return nil, err
@@ -100,7 +100,7 @@ func loadGroup(gdir string) (*staticVerifier, error) {
 	seen := map[[32]byte]string{}
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, ".") {
+		if strings.HasPrefix(name, ".") || name == jwksFile {
 			continue
 		}
 		p := filepath.Join(gdir, name)
@@ -126,10 +126,22 @@ func loadGroup(gdir string) (*staticVerifier, error) {
 		v.callers = append(v.callers, name)
 		v.hashes = append(v.hashes, h)
 	}
-	if len(v.callers) == 0 {
-		return nil, errors.New("no non-empty token files")
+	jp := filepath.Join(gdir, jwksFile)
+	if _, err := os.Stat(jp); err != nil {
+		if len(v.callers) == 0 {
+			return nil, errors.New("no non-empty token files")
+		}
+		return v, nil
 	}
-	return v, nil
+	j, err := loadJWTConfig(jp)
+	if err != nil {
+		return nil, err
+	}
+	j.start(context.Background())
+	if len(v.callers) == 0 {
+		return j, nil
+	}
+	return multiVerifier{v, j}, nil
 }
 
 // Has reports whether group was loaded.
