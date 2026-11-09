@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -137,6 +138,11 @@ func loadGroup(gdir string) (verifier, error) {
 	if err != nil {
 		return nil, err
 	}
+	for _, name := range j.cfg.Callers {
+		if name == "" || slices.Contains(v.callers, name) {
+			return nil, fmt.Errorf("%s: caller name %q empty or used by a static token", jwksFile, name)
+		}
+	}
 	j.start(context.Background())
 	if len(v.callers) == 0 {
 		return j, nil
@@ -158,7 +164,7 @@ func (a *Auth) Require(group string, next http.Handler) http.Handler {
 		if v != nil {
 			if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
 				if caller, ok := v.verify(r.Context(), bearer); ok {
-					logf("caller=%s path=%s", caller, r.URL.Path)
+					logf("caller=%q path=%s", caller, r.URL.Path)
 					next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, caller)))
 					return
 				}

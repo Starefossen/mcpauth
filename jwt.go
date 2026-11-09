@@ -30,7 +30,10 @@ const (
 
 var (
 	now        = time.Now
-	httpClient = &http.Client{Timeout: 10 * time.Second}
+	httpClient = &http.Client{
+		Timeout:       10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	// retryDelays is the startup backoff until the first JWKS loads; the
 	// last value repeats.
 	retryDelays = []time.Duration{time.Second, 5 * time.Second, 30 * time.Second}
@@ -40,9 +43,10 @@ type jwtConfig struct {
 	Issuer   string `json:"issuer"`
 	Audience string `json:"audience"`
 	JWKSURL  string `json:"jwks_url"`
-	// RequiredGroup, if set, must appear in the token's groups claim, either
-	// verbatim or as the part before "@" (Kanidm emits SPNs).
-	RequiredGroup string `json:"required_group"`
+	// RequiredScope lists scopes that must all be in the token's scope claim.
+	RequiredScope []string `json:"required_scope"`
+	// Callers maps sub (a Kanidm UUID) to a readable caller name.
+	Callers map[string]string `json:"callers"`
 }
 
 type jwtVerifier struct {
@@ -169,6 +173,8 @@ func (j *jwtVerifier) key(ctx context.Context, kid string) *ecdsa.PublicKey {
 	}
 	j.lastFetch = now()
 	j.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
 	_ = j.fetch(ctx)
 	j.mu.RLock()
 	defer j.mu.RUnlock()
@@ -192,13 +198,12 @@ func (a *audience) UnmarshalJSON(b []byte) error {
 }
 
 type claims struct {
-	Iss               string   `json:"iss"`
-	Sub               string   `json:"sub"`
-	Aud               audience `json:"aud"`
-	Exp               *float64 `json:"exp"`
-	Nbf               *float64 `json:"nbf"`
-	PreferredUsername string   `json:"preferred_username"`
-	Groups            []string `json:"groups"`
+	Iss   string   `json:"iss"`
+	Sub   string   `json:"sub"`
+	Aud   audience `json:"aud"`
+	Exp   *float64 `json:"exp"`
+	Nbf   *float64 `json:"nbf"`
+	Scope string   `json:"scope"`
 }
 
 func (j *jwtVerifier) verify(ctx context.Context, bearer string) (string, bool) {
@@ -213,7 +218,7 @@ func (j *jwtVerifier) verify(ctx context.Context, bearer string) (string, bool) 
 		Alg, Kid, Typ string
 		Crit          json.RawMessage
 	}
-	if !decodeSegment(parts[0], &hdr) || hdr.Alg != "ES256" || hdr.Kid == "" || hdr.Crit != nil {
+	if !decodeSegment(parts[0], &hdr) || hdr.Alg != "ES256" || hdr.Kid == "" || !strings.EqualFold(hdr.Typ, "at+jwt") || hdr.Crit != nil {
 		return "", false
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
@@ -238,14 +243,16 @@ func (j *jwtVerifier) verify(ctx context.Context, bearer string) (string, bool) 
 	if t > *c.Exp+skew || (c.Nbf != nil && t < *c.Nbf-skew) {
 		return "", false
 	}
-	if g := j.cfg.RequiredGroup; g != "" && !hasGroup(c.Groups, g) {
-		return "", false
+	scopes := strings.Fields(c.Scope)
+	for _, want := range j.cfg.RequiredScope {
+		if !contains(scopes, want) {
+			return "", false
+		}
 	}
-	caller, _, _ := strings.Cut(c.PreferredUsername, "@")
-	if caller == "" {
-		caller = c.Sub
+	if name, ok := j.cfg.Callers[c.Sub]; ok {
+		return name, true
 	}
-	return caller, caller != ""
+	return c.Sub, c.Sub != ""
 }
 
 func decodeSegment(seg string, v any) bool {
@@ -256,15 +263,6 @@ func decodeSegment(seg string, v any) bool {
 func contains(l []string, s string) bool {
 	for _, x := range l {
 		if x == s {
-			return true
-		}
-	}
-	return false
-}
-
-func hasGroup(groups []string, want string) bool {
-	for _, g := range groups {
-		if name, _, _ := strings.Cut(g, "@"); g == want || name == want {
 			return true
 		}
 	}

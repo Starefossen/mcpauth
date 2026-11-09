@@ -1,6 +1,7 @@
 package mcpauth
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/hmac"
@@ -55,6 +56,7 @@ func newJWKSServer(t *testing.T) *jwksServer {
 	t.Cleanup(s.Close)
 	old := httpClient
 	httpClient = s.Client()
+	httpClient.CheckRedirect = old.CheckRedirect
 	t.Cleanup(func() { httpClient = old })
 	return s
 }
@@ -90,8 +92,7 @@ func kanidmClaims() map[string]any {
 	return map[string]any{
 		"iss": testIss, "sub": "0b0e5c4e-uuid", "aud": testAud,
 		"iat": n, "nbf": n, "exp": n + 900,
-		"preferred_username": "sa-varden@id.example.org",
-		"groups":             []string{"mcp-read@id.example.org", "00000000-uuid"},
+		"jti": "j", "client_id": testAud, "scope": "openid groups",
 	}
 }
 
@@ -133,21 +134,22 @@ func waitLoaded(t *testing.T, a *Auth) {
 	t.Fatal("jwks never loaded")
 }
 
-const baseCfg = `{"issuer":"` + testIss + `","audience":"` + testAud + `","jwks_url":"%s","required_group":"mcp-read"}`
+const baseCfg = `{"issuer":"` + testIss + `","audience":"` + testAud + `","jwks_url":"%s","required_scope":["groups"],"callers":{"0b0e5c4e-uuid":"varden"}}`
 
 func TestJWTAccepts(t *testing.T) {
 	a, _, k := setupJWT(t, baseCfg, true)
 	tok := sign(t, k, map[string]any{"alg": "ES256", "kid": "k1", "typ": "at+jwt"}, kanidmClaims())
-	if c := do(t, a, "read", "Bearer "+tok, ""); c.code != 200 || c.caller != "sa-varden" {
+	if c := do(t, a, "read", "Bearer "+tok, ""); c.code != 200 || c.caller != "varden" || c.log != "caller=\"varden\" path=/sse\n" {
 		t.Fatalf("%+v", c)
 	}
 	if c := do(t, a, "read", "Bearer "+tokLegacy, ""); c.code != 200 || c.caller != "legacy" {
 		t.Fatalf("static: %+v", c)
 	}
 	cl := kanidmClaims()
-	delete(cl, "preferred_username")
+	cl["sub"] = "unmapped-uuid"
 	cl["aud"] = []string{"other", testAud}
-	if c := do(t, a, "read", "Bearer "+sign(t, k, map[string]any{"alg": "ES256", "kid": "k1"}, cl), ""); c.caller != "0b0e5c4e-uuid" {
+	cl["scope"] = "groups openid extra"
+	if c := do(t, a, "read", "Bearer "+sign(t, k, map[string]any{"alg": "ES256", "kid": "k1", "typ": "AT+JWT"}, cl), ""); c.caller != "unmapped-uuid" {
 		t.Fatalf("sub fallback: %+v", c)
 	}
 }
@@ -155,7 +157,7 @@ func TestJWTAccepts(t *testing.T) {
 func TestJWTRejects(t *testing.T) {
 	a, _, k := setupJWT(t, baseCfg, false)
 	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	hdr := map[string]any{"alg": "ES256", "kid": "k1"}
+	hdr := map[string]any{"alg": "ES256", "kid": "k1", "typ": "at+jwt"}
 	mod := func(f func(map[string]any)) map[string]any { c := kanidmClaims(); f(c); return c }
 	n := time.Now().Unix()
 	good := sign(t, k, hdr, kanidmClaims())
@@ -168,13 +170,16 @@ func TestJWTRejects(t *testing.T) {
 		"future nbf":     sign(t, k, hdr, mod(func(c map[string]any) { c["nbf"] = n + 120 })),
 		"wrong aud":      sign(t, k, hdr, mod(func(c map[string]any) { c["aud"] = "mcp-write" })),
 		"wrong iss":      sign(t, k, hdr, mod(func(c map[string]any) { c["iss"] = "https://evil" })),
-		"missing group":  sign(t, k, hdr, mod(func(c map[string]any) { c["groups"] = []string{"mcp-write"} })),
+		"missing scope":  sign(t, k, hdr, mod(func(c map[string]any) { c["scope"] = "openid" })),
+		"no scope":       sign(t, k, hdr, mod(func(c map[string]any) { delete(c, "scope") })),
+		"id token typ":   sign(t, k, map[string]any{"alg": "ES256", "kid": "k1", "typ": "JWT"}, mod(func(c map[string]any) { c["groups"] = []string{"mcp-read"} })),
+		"no typ":         sign(t, k, map[string]any{"alg": "ES256", "kid": "k1"}, kanidmClaims()),
 		"wrong key":      sign(t, other, hdr, kanidmClaims()),
-		"unknown kid":    sign(t, k, map[string]any{"alg": "ES256", "kid": "nope"}, kanidmClaims()),
-		"no kid":         sign(t, k, map[string]any{"alg": "ES256"}, kanidmClaims()),
+		"unknown kid":    sign(t, k, map[string]any{"alg": "ES256", "kid": "nope", "typ": "at+jwt"}, kanidmClaims()),
+		"no kid":         sign(t, k, map[string]any{"alg": "ES256", "typ": "at+jwt"}, kanidmClaims()),
 		"alg none":       b64json(map[string]any{"alg": "none", "kid": "k1"}) + "." + b64json(kanidmClaims()) + ".",
 		"alg HS256":      hs + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)),
-		"crit":           sign(t, k, map[string]any{"alg": "ES256", "kid": "k1", "crit": []string{"x"}}, kanidmClaims()),
+		"crit":           sign(t, k, map[string]any{"alg": "ES256", "kid": "k1", "typ": "at+jwt", "crit": []string{"x"}}, kanidmClaims()),
 		"tampered claim": good[:len(good)-90] + "A" + good[len(good)-89:],
 		"two parts":      good[:len(good)-87],
 	}
@@ -197,15 +202,39 @@ func TestJWTUnknownKidRefetchRateLimited(t *testing.T) {
 	j.mu.Unlock()
 	k2 := s.addKey(t, "k2")
 	before := s.calls.Load()
-	tok := sign(t, k2, map[string]any{"alg": "ES256", "kid": "k2"}, kanidmClaims())
+	tok := sign(t, k2, map[string]any{"alg": "ES256", "kid": "k2", "typ": "at+jwt"}, kanidmClaims())
 	if c := do(t, a, "read", "Bearer "+tok, ""); c.code != 200 {
 		t.Fatalf("rotated key: %+v", c)
 	}
 	for range 20 {
-		do(t, a, "read", "Bearer "+sign(t, k2, map[string]any{"alg": "ES256", "kid": "random"}, kanidmClaims()), "")
+		do(t, a, "read", "Bearer "+sign(t, k2, map[string]any{"alg": "ES256", "kid": "random", "typ": "at+jwt"}, kanidmClaims()), "")
 	}
 	if got := s.calls.Load() - before; got != 1 {
 		t.Fatalf("jwks fetches = %d, want 1", got)
+	}
+}
+
+func TestNoRedirects(t *testing.T) {
+	s := newJWKSServer(t)
+	s.addKey(t, "k1")
+	r := httptest.NewTLSServer(http.RedirectHandler(s.URL, http.StatusFound))
+	defer r.Close()
+	if _, err := fetchJWKS(t.Context(), r.URL); err == nil {
+		t.Fatal("followed redirect")
+	}
+}
+
+func TestUnknownKidRefetchSurvivesCanceledRequest(t *testing.T) {
+	a, s, _ := setupJWT(t, baseCfg, false)
+	j := jv(a)
+	j.mu.Lock()
+	j.lastFetch = time.Time{}
+	j.mu.Unlock()
+	s.addKey(t, "k2")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if j.key(ctx, "k2") == nil {
+		t.Fatal("refetch used canceled request ctx")
 	}
 }
 
@@ -216,7 +245,7 @@ func TestJWKSOutageKeepsKeysAndStatic(t *testing.T) {
 	if err := j.refresh(t.Context()); err == nil {
 		t.Fatal("refresh succeeded while down")
 	}
-	tok := sign(t, k, map[string]any{"alg": "ES256", "kid": "k1"}, kanidmClaims())
+	tok := sign(t, k, map[string]any{"alg": "ES256", "kid": "k1", "typ": "at+jwt"}, kanidmClaims())
 	if c := do(t, a, "read", "Bearer "+tok, ""); c.code != 200 {
 		t.Errorf("cached key: %+v", c)
 	}
@@ -240,7 +269,7 @@ func TestJWKSDownAtStart(t *testing.T) {
 	if c := do(t, a, "read", "Bearer "+tokLegacy, ""); c.code != 200 {
 		t.Fatalf("static while jwks down: %+v", c)
 	}
-	tok := sign(t, k, map[string]any{"alg": "ES256", "kid": "k1"}, kanidmClaims())
+	tok := sign(t, k, map[string]any{"alg": "ES256", "kid": "k1", "typ": "at+jwt"}, kanidmClaims())
 	if c := do(t, a, "read", "Bearer "+tok, ""); c.code != 401 {
 		t.Fatalf("jwt before jwks: %+v", c)
 	}
@@ -253,13 +282,15 @@ func TestJWKSDownAtStart(t *testing.T) {
 
 func TestJWTConfigValidation(t *testing.T) {
 	for name, cfg := range map[string]string{
-		"http url":      `{"issuer":"i","audience":"a","jwks_url":"http://x"}`,
-		"no audience":   `{"issuer":"i","jwks_url":"https://x"}`,
-		"unknown field": `{"issuer":"i","audience":"a","jwks_url":"https://x","alg":"none"}`,
-		"bad json":      `{`,
+		"http url":       `{"issuer":"i","audience":"a","jwks_url":"http://x"}`,
+		"no audience":    `{"issuer":"i","jwks_url":"https://x"}`,
+		"unknown field":  `{"issuer":"i","audience":"a","jwks_url":"https://x","alg":"none"}`,
+		"bad json":       `{`,
+		"name collision": `{"issuer":"i","audience":"a","jwks_url":"https://x","callers":{"u":"legacy"}}`,
 	} {
 		d := t.TempDir()
 		write(t, filepath.Join(d, "read", jwksFile), cfg)
+		write(t, filepath.Join(d, "read/legacy"), tokLegacy)
 		if _, err := Load(d); err == nil {
 			t.Errorf("%s: Load succeeded", name)
 		}
