@@ -316,3 +316,37 @@ func TestJWTNoCallersAcceptsNothing(t *testing.T) {
 		t.Fatalf("%+v", c)
 	}
 }
+
+func TestJWTColdStartFetchesSynchronously(t *testing.T) {
+	s := newJWKSServer(t)
+	k := s.addKey(t, "k1")
+	d := t.TempDir()
+	p := filepath.Join(d, jwksFile)
+	write(t, p, fmt.Sprintf(baseCfg, s.URL))
+	j, err := loadJWTConfig(p)
+	must(t, err)
+	tok := sign(t, k, map[string]any{"alg": "ES256", "kid": "k1", "typ": "at+jwt"}, accessClaims())
+
+	s.down.Store(true)
+	if _, ok := j.verify(t.Context(), tok); ok {
+		t.Fatal("verified while jwks down")
+	}
+	s.down.Store(false)
+	before := s.calls.Load()
+	var wg sync.WaitGroup
+	var fails atomic.Int32
+	for range 10 {
+		wg.Go(func() {
+			if name, ok := j.verify(t.Context(), tok); !ok || name != "alice" {
+				fails.Add(1)
+			}
+		})
+	}
+	wg.Wait()
+	if n := fails.Load(); n != 0 {
+		t.Fatalf("%d cold-start verifies failed after a failed fetch", n)
+	}
+	if got := s.calls.Load() - before; got != 1 {
+		t.Fatalf("jwks fetches = %d, want 1 (single-flight)", got)
+	}
+}

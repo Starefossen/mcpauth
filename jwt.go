@@ -21,11 +21,12 @@ import (
 const jwksFile = "jwks.json"
 
 const (
-	clockSkew       = 60 * time.Second
-	refreshInterval = time.Hour
-	kidRefetchGap   = 60 * time.Second
-	maxJWTLen       = 8 << 10
-	maxJWKSBytes    = 64 << 10
+	clockSkew        = 60 * time.Second
+	refreshInterval  = time.Hour
+	kidRefetchGap    = 60 * time.Second
+	syncFetchTimeout = 5 * time.Second
+	maxJWTLen        = 8 << 10
+	maxJWKSBytes     = 64 << 10
 )
 
 var (
@@ -55,7 +56,8 @@ type jwtVerifier struct {
 
 	mu        sync.RWMutex
 	keys      map[string]*ecdsa.PublicKey
-	lastFetch time.Time
+	lastFetch time.Time  // last successful fetch
+	fetchMu   sync.Mutex // single-flights on-demand fetches in key
 }
 
 func loadJWTConfig(p string) (*jwtVerifier, error) {
@@ -76,7 +78,8 @@ func loadJWTConfig(p string) (*jwtVerifier, error) {
 }
 
 // start loads the JWKS in the background: retry with backoff until the first
-// success, then refresh hourly. Until loaded, every JWT is rejected.
+// success, then refresh hourly. A request arriving before the first load
+// fetches synchronously in key.
 func (j *jwtVerifier) start(ctx context.Context) {
 	go func() {
 		for i := 0; j.refresh(ctx) != nil; i++ {
@@ -102,9 +105,6 @@ func (j *jwtVerifier) start(ctx context.Context) {
 
 // refresh fetches the JWKS. On error the previous keyset is kept.
 func (j *jwtVerifier) refresh(ctx context.Context) error {
-	j.mu.Lock()
-	j.lastFetch = now()
-	j.mu.Unlock()
 	return j.fetch(ctx)
 }
 
@@ -116,6 +116,7 @@ func (j *jwtVerifier) fetch(ctx context.Context) error {
 	}
 	j.mu.Lock()
 	j.keys = keys
+	j.lastFetch = now()
 	j.mu.Unlock()
 	return nil
 }
@@ -163,23 +164,31 @@ func fetchJWKS(ctx context.Context, url string) (map[string]*ecdsa.PublicKey, er
 	return keys, nil
 }
 
-// key returns the key for kid, refetching the JWKS on a miss at most once
-// per kidRefetchGap so random kids cannot hammer the issuer.
+// key returns the key for kid. On a miss it refetches the JWKS, at most once
+// per kidRefetchGap after a successful fetch so random kids cannot hammer the
+// issuer. With an empty keyset (cold start) it always fetches. Fetches are
+// single-flight.
 func (j *jwtVerifier) key(ctx context.Context, kid string) *ecdsa.PublicKey {
-	j.mu.Lock()
-	k := j.keys[kid]
-	if k != nil || now().Sub(j.lastFetch) < kidRefetchGap {
-		j.mu.Unlock()
+	if k, ok := j.cached(kid); k != nil || !ok {
 		return k
 	}
-	j.lastFetch = now()
-	j.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	j.fetchMu.Lock()
+	defer j.fetchMu.Unlock()
+	if k, ok := j.cached(kid); k != nil || !ok {
+		return k
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), syncFetchTimeout)
 	defer cancel()
 	_ = j.fetch(ctx)
+	k, _ := j.cached(kid)
+	return k
+}
+
+// cached returns the key for kid and whether a refetch is allowed on a miss.
+func (j *jwtVerifier) cached(kid string) (*ecdsa.PublicKey, bool) {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
-	return j.keys[kid]
+	return j.keys[kid], len(j.keys) == 0 || now().Sub(j.lastFetch) >= kidRefetchGap
 }
 
 type audience []string
