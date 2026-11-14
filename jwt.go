@@ -112,20 +112,19 @@ func (j *jwtVerifier) refresh(ctx context.Context) error {
 	return j.fetch(ctx)
 }
 
-// fetch must be called with fetchMu held.
+// fetch must be called with fetchMu held. lastAttempt is stamped when the
+// fetch ends, so the refetch gap runs from the end of a slow attempt.
 func (j *jwtVerifier) fetch(ctx context.Context) error {
-	j.mu.Lock()
-	j.lastAttempt = now()
-	j.mu.Unlock()
 	keys, err := fetchJWKS(ctx, j.cfg.JWKSURL)
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.lastAttempt = now()
 	if err != nil {
 		logf("mcpauth: jwks fetch %s: %v", j.cfg.JWKSURL, err)
 		return err
 	}
-	j.mu.Lock()
 	j.keys = keys
-	j.lastFetch = now()
-	j.mu.Unlock()
+	j.lastFetch = j.lastAttempt
 	return nil
 }
 
@@ -172,9 +171,10 @@ func fetchJWKS(ctx context.Context, url string) (map[string]*ecdsa.PublicKey, er
 	return keys, nil
 }
 
-// key returns the key for kid. On a miss it refetches the JWKS, at most one
-// attempt per kidRefetchGap (emptyRefetchGap while no keys are loaded),
-// successful or not, so forged kids cannot hammer the issuer. kid is read
+// key returns the key for kid. On a miss it refetches the JWKS, at most once
+// per kidRefetchGap (emptyRefetchGap while no keys are loaded) measured from
+// the end of the last attempt, successful or not, so forged kids cannot
+// hammer the issuer. kid is read
 // before the signature is checked. Waiters that queued behind a fetch
 // re-check under fetchMu, so they wait at most for the one in-flight fetch
 // and then use its result or fail fast.

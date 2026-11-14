@@ -31,12 +31,14 @@ type jwksServer struct {
 	keys  map[string]*ecdsa.PrivateKey
 	down  atomic.Bool
 	calls atomic.Int32
+	delay atomic.Int64
 }
 
 func newJWKSServer(t *testing.T) *jwksServer {
 	s := &jwksServer{keys: map[string]*ecdsa.PrivateKey{}}
 	s.Server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		s.calls.Add(1)
+		time.Sleep(time.Duration(s.delay.Load()))
 		if s.down.Load() {
 			http.Error(w, "down", 503)
 			return
@@ -380,5 +382,29 @@ func TestForgedKidsWithIssuerDownCapFetches(t *testing.T) {
 		if got := s.calls.Load() - before; got != 1 {
 			t.Errorf("loaded=%v: jwks fetches = %d, want 1", loaded, got)
 		}
+	}
+}
+
+func TestSlowFailingIssuerSingleFetch(t *testing.T) {
+	s := newJWKSServer(t)
+	s.addKey(t, "k1")
+	d := t.TempDir()
+	p := filepath.Join(d, jwksFile)
+	write(t, p, fmt.Sprintf(baseCfg, s.URL))
+	j, err := loadJWTConfig(p)
+	must(t, err)
+	s.down.Store(true)
+	s.delay.Store(int64(1500 * time.Millisecond))
+	start := time.Now()
+	var wg sync.WaitGroup
+	for range 6 {
+		wg.Go(func() { j.key(t.Context(), "k1") })
+	}
+	wg.Wait()
+	if got := s.calls.Load(); got != 1 {
+		t.Errorf("jwks fetches = %d, want 1", got)
+	}
+	if el := time.Since(start); el > 3*time.Second {
+		t.Errorf("waited %v, want about one fetch", el)
 	}
 }
