@@ -24,6 +24,7 @@ const (
 	clockSkew        = 60 * time.Second
 	refreshInterval  = time.Hour
 	kidRefetchGap    = 60 * time.Second
+	emptyRefetchGap  = time.Second
 	syncFetchTimeout = 5 * time.Second
 	maxJWTLen        = 8 << 10
 	maxJWKSBytes     = 64 << 10
@@ -54,10 +55,11 @@ type jwtConfig struct {
 type jwtVerifier struct {
 	cfg jwtConfig
 
-	mu        sync.RWMutex
-	keys      map[string]*ecdsa.PublicKey
-	lastFetch time.Time  // last successful fetch
-	fetchMu   sync.Mutex // single-flights on-demand fetches in key
+	mu          sync.RWMutex
+	keys        map[string]*ecdsa.PublicKey
+	lastFetch   time.Time  // last successful fetch
+	lastAttempt time.Time  // last fetch attempt, successful or not
+	fetchMu     sync.Mutex // serializes all fetches
 }
 
 func loadJWTConfig(p string) (*jwtVerifier, error) {
@@ -105,10 +107,16 @@ func (j *jwtVerifier) start(ctx context.Context) {
 
 // refresh fetches the JWKS. On error the previous keyset is kept.
 func (j *jwtVerifier) refresh(ctx context.Context) error {
+	j.fetchMu.Lock()
+	defer j.fetchMu.Unlock()
 	return j.fetch(ctx)
 }
 
+// fetch must be called with fetchMu held.
 func (j *jwtVerifier) fetch(ctx context.Context) error {
+	j.mu.Lock()
+	j.lastAttempt = now()
+	j.mu.Unlock()
 	keys, err := fetchJWKS(ctx, j.cfg.JWKSURL)
 	if err != nil {
 		logf("mcpauth: jwks fetch %s: %v", j.cfg.JWKSURL, err)
@@ -164,12 +172,14 @@ func fetchJWKS(ctx context.Context, url string) (map[string]*ecdsa.PublicKey, er
 	return keys, nil
 }
 
-// key returns the key for kid. On a miss it refetches the JWKS, at most once
-// per kidRefetchGap after a successful fetch so random kids cannot hammer the
-// issuer. With an empty keyset (cold start) it always fetches. Fetches are
-// single-flight.
+// key returns the key for kid. On a miss it refetches the JWKS, at most one
+// attempt per kidRefetchGap (emptyRefetchGap while no keys are loaded),
+// successful or not, so forged kids cannot hammer the issuer. kid is read
+// before the signature is checked. Waiters that queued behind a fetch
+// re-check under fetchMu, so they wait at most for the one in-flight fetch
+// and then use its result or fail fast.
 func (j *jwtVerifier) key(ctx context.Context, kid string) *ecdsa.PublicKey {
-	if k, ok := j.cached(kid); k != nil || !ok {
+	if k, _ := j.cached(kid); k != nil {
 		return k
 	}
 	j.fetchMu.Lock()
@@ -188,7 +198,11 @@ func (j *jwtVerifier) key(ctx context.Context, kid string) *ecdsa.PublicKey {
 func (j *jwtVerifier) cached(kid string) (*ecdsa.PublicKey, bool) {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
-	return j.keys[kid], len(j.keys) == 0 || now().Sub(j.lastFetch) >= kidRefetchGap
+	gap := kidRefetchGap
+	if len(j.keys) == 0 {
+		gap = emptyRefetchGap
+	}
+	return j.keys[kid], now().Sub(j.lastAttempt) >= gap
 }
 
 type audience []string

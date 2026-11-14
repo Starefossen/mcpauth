@@ -1,7 +1,6 @@
 package mcpauth
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -201,6 +200,7 @@ func TestJWTUnknownKidRefetchRateLimited(t *testing.T) {
 	j := jv(a)
 	j.mu.Lock()
 	j.lastFetch = time.Time{}
+	j.lastAttempt = time.Time{}
 	j.mu.Unlock()
 	k2 := s.addKey(t, "k2")
 	before := s.calls.Load()
@@ -231,6 +231,7 @@ func TestUnknownKidRefetchSurvivesCanceledRequest(t *testing.T) {
 	j := jv(a)
 	j.mu.Lock()
 	j.lastFetch = time.Time{}
+	j.lastAttempt = time.Time{}
 	j.mu.Unlock()
 	s.addKey(t, "k2")
 	ctx, cancel := context.WithCancel(t.Context())
@@ -302,14 +303,11 @@ func TestJWTConfigValidation(t *testing.T) {
 }
 
 func TestJWTNoCallersAcceptsNothing(t *testing.T) {
-	var buf bytes.Buffer
-	old := logf
-	logf = func(f string, v ...any) { fmt.Fprintf(&buf, f+"\n", v...) }
+	stop := captureLog()
 	cfg := `{"issuer":"` + testIss + `","audience":"` + testAud + `","jwks_url":"%s","required_scope":["groups"]}`
 	a, _, k := setupJWT(t, cfg, false)
-	logf = old
-	if !strings.Contains(buf.String(), "no callers") {
-		t.Fatalf("missing warning: %q", buf.String())
+	if got := stop(); !strings.Contains(got, "no callers") {
+		t.Fatalf("missing warning: %q", got)
 	}
 	tok := sign(t, k, map[string]any{"alg": "ES256", "kid": "k1", "typ": "at+jwt"}, accessClaims())
 	if c := do(t, a, "read", "Bearer "+tok, ""); c.code != 401 {
@@ -332,6 +330,9 @@ func TestJWTColdStartFetchesSynchronously(t *testing.T) {
 		t.Fatal("verified while jwks down")
 	}
 	s.down.Store(false)
+	j.mu.Lock()
+	j.lastAttempt = time.Time{}
+	j.mu.Unlock()
 	before := s.calls.Load()
 	var wg sync.WaitGroup
 	var fails atomic.Int32
@@ -348,5 +349,36 @@ func TestJWTColdStartFetchesSynchronously(t *testing.T) {
 	}
 	if got := s.calls.Load() - before; got != 1 {
 		t.Fatalf("jwks fetches = %d, want 1 (single-flight)", got)
+	}
+}
+
+func TestForgedKidsWithIssuerDownCapFetches(t *testing.T) {
+	for _, loaded := range []bool{false, true} {
+		s := newJWKSServer(t)
+		s.addKey(t, "k1")
+		d := t.TempDir()
+		p := filepath.Join(d, jwksFile)
+		write(t, p, fmt.Sprintf(baseCfg, s.URL))
+		j, err := loadJWTConfig(p)
+		must(t, err)
+		if loaded {
+			must(t, j.refresh(t.Context()))
+			j.mu.Lock()
+			j.lastFetch, j.lastAttempt = time.Time{}, time.Time{}
+			j.mu.Unlock()
+		}
+		s.down.Store(true)
+		before := s.calls.Load()
+		var wg sync.WaitGroup
+		for i := range 20 {
+			wg.Go(func() { j.key(t.Context(), fmt.Sprintf("forged%d", i)) })
+		}
+		wg.Wait()
+		for i := range 20 {
+			j.key(t.Context(), fmt.Sprintf("serial%d", i))
+		}
+		if got := s.calls.Load() - before; got != 1 {
+			t.Errorf("loaded=%v: jwks fetches = %d, want 1", loaded, got)
+		}
 	}
 }

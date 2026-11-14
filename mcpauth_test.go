@@ -8,12 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
 const (
 	tokAlice = "alice-token-0123456789"
-	tokBob = "bob-token-0123456789"
+	tokBob   = "bob-token-0123456789"
 )
 
 func write(t *testing.T, p, s string) {
@@ -90,10 +91,7 @@ type result struct {
 
 func do(t *testing.T, a *Auth, group, authz, query string) result {
 	t.Helper()
-	var buf bytes.Buffer
-	old := logf
-	logf = func(f string, v ...any) { fmt.Fprintf(&buf, f+"\n", v...) }
-	defer func() { logf = old }()
+	stop := captureLog()
 	var caller string
 	h := a.Require(group, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		caller = Caller(r.Context())
@@ -105,7 +103,39 @@ func do(t *testing.T, a *Auth, group, authz, query string) result {
 	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	return result{rec.Code, rec.Body.String(), caller, buf.String()}
+	return result{rec.Code, rec.Body.String(), caller, stop()}
+}
+
+// logSink lets tests capture logf output while background JWKS goroutines
+// keep logging concurrently.
+var logSink struct {
+	sync.Mutex
+	buf *bytes.Buffer
+}
+
+func init() {
+	logf = func(f string, v ...any) {
+		logSink.Lock()
+		defer logSink.Unlock()
+		if logSink.buf != nil {
+			fmt.Fprintf(logSink.buf, f+"\n", v...)
+		}
+	}
+}
+
+// captureLog starts capturing logf output; the returned func stops and
+// returns it.
+func captureLog() func() string {
+	logSink.Lock()
+	defer logSink.Unlock()
+	b := &bytes.Buffer{}
+	logSink.buf = b
+	return func() string {
+		logSink.Lock()
+		defer logSink.Unlock()
+		logSink.buf = nil
+		return b.String()
+	}
 }
 
 func TestRequire(t *testing.T) {
